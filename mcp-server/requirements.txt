@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+mcp==2.2.0
+httpx
+python-dotenv
+qdrant-client
+psycopg2-binary

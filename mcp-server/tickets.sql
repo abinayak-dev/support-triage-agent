@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS tickets (
+  id SERIAL PRIMARY KEY,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  category TEXT NOT NULL,
+  priority TEXT NOT NULL,
+  team TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
