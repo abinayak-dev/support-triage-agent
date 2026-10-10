@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
-from tools.providers import chat_completion, embed_texts
+from tools.providers import chat_completion, embed_texts, vector_dimension
 
 
 class ProviderTests(unittest.TestCase):
@@ -89,6 +89,10 @@ class ProviderTests(unittest.TestCase):
     def test_hosted_chat_requires_explicit_endpoint_configuration(self):
         with self.assertRaisesRegex(ValueError, "LLM_BASE_URL"):
             chat_completion([{"role": "user", "content": "Test"}])
+
+    def test_embedding_dimension_check_covers_multiple_ingestion_batches(self):
+        with self.assertRaisesRegex(ValueError, "inconsistent dimensions"):
+            vector_dimension([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7]])
 
 
 if __name__ == "__main__":

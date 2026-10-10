@@ -10,6 +10,15 @@ class ChatMessage(TypedDict):
     content: str
 
 
+def vector_dimension(vectors: list[list[float]]) -> int:
+    if not vectors:
+        raise ValueError("Embedding provider returned no vectors")
+    dimensions = {len(vector) for vector in vectors}
+    if 0 in dimensions or len(dimensions) != 1:
+        raise ValueError("Embedding provider returned vectors with inconsistent dimensions")
+    return next(iter(dimensions))
+
+
 def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -114,7 +123,5 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         for vector in vectors
     ):
         raise ValueError("Embedding provider returned an invalid vector")
-    dimensions = {len(vector) for vector in vectors}
-    if len(dimensions) != 1:
-        raise ValueError("Embedding provider returned vectors with inconsistent dimensions")
+    vector_dimension(vectors)
     return [[float(value) for value in vector] for vector in vectors]

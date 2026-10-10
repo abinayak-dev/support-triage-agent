@@ -19,7 +19,7 @@ flowchart LR
     FRONTEND[Optional public frontend] -->|Server-side proxy only| API
 ```
 
-The repository does not contain frontend source, a Docker Compose file, or an exported n8n workflow. The existing n8n workflow is configured in the n8n instance; its HTTP Request nodes can use the configurable API base URL described below.
+The repository does not contain frontend source or an exported n8n workflow. `docker-compose.yml` provides persistent local PostgreSQL and Qdrant services plus an opt-in API container profile. The existing n8n workflow is configured in the n8n instance; its HTTP Request nodes can use the configurable API base URL described below.
 
 ## Component and deployment audit
 
@@ -30,7 +30,7 @@ The repository does not contain frontend source, a Docker Compose file, or an ex
 | RAG embeddings | `tools/providers.py` uses local Ollama `nomic-embed-text` by default or a configured OpenAI-compatible embeddings endpoint. `rag-ingest/ingest.py` uses the same adapter as live queries. |
 | Qdrant | The query and ingestion code use `QDRANT_HOST`, optional `QDRANT_API_KEY`, and `QDRANT_COLLECTION`. Production needs a reachable managed Qdrant or a separately operated Qdrant service. |
 | PostgreSQL | `tools/ticket_router.py` persists routed tickets using required `POSTGRES_URL`. Production can use Supabase PostgreSQL or another PostgreSQL provider. The table definition is in `mcp-server/tickets.sql`. |
-| Docker | Docker is not required by the Python code itself. The root Dockerfile packages the API. Local Qdrant, PostgreSQL, and n8n can continue running in Docker; there is no project Compose file to replace those currently running containers. |
+| Docker | Docker is not required by the Python code itself. The root Dockerfile packages the API. Compose manages only this project's PostgreSQL and Qdrant services by default; the API container is opt-in, and n8n is not managed or recreated by Compose. |
 | n8n | n8n calls the REST endpoints server-to-server with `X-API-Key`. Its API credential belongs in n8n's credential store, not in browser code or a workflow export. |
 | Persistent process/local filesystem | The FastAPI/MCP server needs a running process. The knowledge base is read from `rag-ingest/knowledge_base` during ingestion; deployed query instances use vectors in Qdrant and do not need the source files at runtime. |
 
@@ -45,9 +45,9 @@ The repository does not contain frontend source, a Docker Compose file, or an ex
 
 ## Local setup
 
-Requirements: Python 3.10+, Ollama, and local PostgreSQL/Qdrant services. n8n is optional if only testing the REST API.
+Requirements: Python 3.11, Ollama, and local PostgreSQL/Qdrant services. n8n is optional if only testing the REST API.
 
-1. Create an environment file from the safe template and set a fresh `API_KEY` and your local PostgreSQL URL. The template uses the project-local PostgreSQL port `15432` as an example; adjust it to your actual local service.
+1. Create an environment file from the safe template. Set a fresh `API_KEY`, a new URL-safe `POSTGRES_PASSWORD`, and a `POSTGRES_URL` with the matching password. Keep `APP_ENV=development` for local runs.
 
    ```powershell
    if (-not (Test-Path mcp-server\.env)) { Copy-Item .env.example mcp-server\.env }
@@ -65,11 +65,13 @@ Requirements: Python 3.10+, Ollama, and local PostgreSQL/Qdrant services. n8n is
 
    The server listens on `0.0.0.0:8000` by default. Ollama defaults to `http://localhost:11434`; pull `tinyllama` and `nomic-embed-text` before using local classification and RAG.
 
-3. Ensure the `tickets` table exists. From `mcp-server`, apply the schema to the configured database:
+3. Ensure the `tickets` table exists. For the local Compose database, run from the repository root:
 
    ```powershell
-   psql "$env:POSTGRES_URL" -f tickets.sql
+   Get-Content mcp-server\tickets.sql | docker exec -i support-triage-postgres-local psql -U triage -d tickets
    ```
+
+   This schema uses `CREATE TABLE IF NOT EXISTS`. For another database, apply `mcp-server/tickets.sql` with its provider console or a `psql` session configured from a secure connection string.
 
 4. Ingest the knowledge base:
 
@@ -81,7 +83,39 @@ Requirements: Python 3.10+, Ollama, and local PostgreSQL/Qdrant services. n8n is
 
 The default local Qdrant URL is `http://localhost:6333`. Ingestion is safe to rerun: point IDs are deterministic and stale points are removed within the configured collection.
 
+## Running tests
+
+Run the backend tests from the backend directory so the existing `tools` package imports resolve:
+
+```powershell
+Set-Location mcp-server
+python -m pip install -r requirements-dev.txt
+python -m pytest -v
+```
+
 ## Docker setup
+
+### Persistent local services with Compose
+
+Create `mcp-server/.env` from `.env.example` if needed, then set a fresh `POSTGRES_PASSWORD` and a matching `POSTGRES_URL`. Keep this file private; it is ignored by Git and excluded from the API image.
+
+Start PostgreSQL and Qdrant:
+
+```powershell
+docker compose --env-file mcp-server\.env up -d postgres qdrant
+```
+
+The database is published only on `localhost:15432`, and Qdrant only on `localhost:6333`; both use named volumes. The API waits for PostgreSQL and Qdrant health checks. Qdrant's health check verifies its service port is accepting connections. The existing Ollama and n8n services are not managed by this Compose file.
+
+To build and start the API container as well:
+
+```powershell
+docker compose --env-file mcp-server\.env --profile api up -d --build api
+```
+
+The API container connects to PostgreSQL and Qdrant over the Compose network and to host Ollama at `host.docker.internal:11434`. Its port 8000 is published for host and n8n access. `docker compose down` stops these project services but preserves their named volumes; do not add `-v` unless intentionally deleting local database and vector data.
+
+### Manual API container
 
 Build the API image from the repository root:
 
@@ -104,11 +138,13 @@ Copy `.env.example` to `mcp-server/.env` for local API and ingestion runs. In pr
 | Variable | Default / required | Purpose |
 | --- | --- | --- |
 | `API_KEY` | Required | REST and MCP authentication using `X-API-Key`. Must be a unique high-entropy value. |
+| `APP_ENV` | `development` | Use `production` on a public deployment; startup validation then requires TLS-enabled managed services and hosted model endpoints. |
 | `HOST`, `PORT` | `0.0.0.0`, `8000` | Bind address and port; cloud platforms commonly set `PORT`. |
 | `LOG_LEVEL` | `INFO` | Application log level. |
 | `RATE_LIMIT_PER_MIN` | `60` | Per-process request limit for protected REST endpoints. |
 | `CORS_ORIGINS` | Empty | Comma-separated frontend origins. CORS is enabled only for explicitly listed origins. It is not a substitute for API authentication. |
 | `POSTGRES_URL` | Required for routing | PostgreSQL connection string. Use the provider's TLS/SSL-enabled URL in production. |
+| `POSTGRES_PASSWORD` | Local Compose only | Password for the local Compose PostgreSQL role. Use a URL-safe random value and keep it only in `mcp-server/.env`; production credentials belong in the hosting secret manager. |
 | `LLM_PROVIDER` | `ollama` | Chat provider: `ollama` or `openai_compatible`. |
 | `OLLAMA_HOST` | `http://localhost:11434` | Local Ollama host, used by local chat and embedding adapters. |
 | `CLASSIFY_MODEL` | `tinyllama` | Ollama chat model used when `LLM_MODEL` is not set. |
@@ -122,7 +158,7 @@ Copy `.env.example` to `mcp-server/.env` for local API and ingestion runs. In pr
 | `CHUNK_SIZE`, `CHUNK_OVERLAP` | `800`, `100` | Knowledge-base chunking settings for ingestion. |
 | `TRIAGE_API_BASE_URL` | `http://host.docker.internal:8000` | Base URL for n8n HTTP Request nodes; set it to the deployed HTTPS API URL in production. Store the API key separately in n8n credentials. |
 
-When changing the embedding model, re-ingest into a new collection or deliberately recreate the old collection after backing up any required vectors. The collection's vector dimension must match the selected model.
+When changing the embedding model, ingest into a new `QDRANT_COLLECTION` and switch the API to it only after verifying the migration. Ingestion refuses a vector-dimension mismatch and never deletes or recreates a collection. Keep the old collection until the migration is verified and any cleanup is explicitly approved.
 
 ## API endpoints
 
@@ -189,17 +225,17 @@ Vercel frontend (optional)
 n8n (self-hosted or hosted) -> same HTTPS API using server-side Header Auth credential
 ```
 
-The backend can be built with this repository's root Dockerfile and deployed to a container service. Configure `API_KEY`, `POSTGRES_URL`, `QDRANT_HOST`, `QDRANT_API_KEY`, `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `EMBEDDING_PROVIDER`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, and `EMBED_MODEL` in that service's secret manager. Configure `CORS_ORIGINS` to only the frontend origin if browser requests are needed; preferably keep the API key in the server-side frontend proxy and do not call the protected API directly from browser JavaScript.
+For a concrete container-host target, use a Render Docker Web Service with Render PostgreSQL and Qdrant Cloud. These are independently provisioned services; check current pricing and region/network requirements before creating paid resources. The backend can also run on another Docker-compatible host with equivalent settings. Set `APP_ENV=production`, `API_KEY`, `POSTGRES_URL`, `QDRANT_HOST`, `QDRANT_API_KEY`, `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `EMBEDDING_PROVIDER`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, and `EMBED_MODEL` in the web service's secret manager. Production startup rejects localhost dependencies, non-TLS database/Qdrant/provider URLs, missing credentials, and short API keys. PostgreSQL must use `sslmode=require` or stronger; prefer `verify-full` when supported by the provider. Configure `CORS_ORIGINS` to only the frontend origin if browser requests are needed; preferably keep the API key in the server-side frontend proxy and do not call the protected API directly from browser JavaScript.
 
 Deployment steps:
 
-1. Provision managed PostgreSQL and Qdrant; restrict their network/API access.
-2. Apply `mcp-server/tickets.sql` to the PostgreSQL database.
-3. Provision an OpenAI-compatible chat and embedding service (these may be the same service, but each base URL/key is configured independently).
-4. Build and deploy the container. Set the environment variables above in the hosting platform; do not upload `.env`.
-5. From a trusted ingestion environment, set the same Qdrant and embedding-provider configuration and run `python rag-ingest/ingest.py`.
-6. Verify `GET https://<api-domain>/health`, then exercise the protected endpoints from n8n or the server-side frontend proxy.
-7. Set n8n's `TRIAGE_API_BASE_URL` to the HTTPS API URL and configure its Header Auth credential.
+1. In Render, create or select a private GitHub repository connection and create a **Web Service** with **Docker** as the runtime. Select this repository and the root `Dockerfile`; configure the service port as `8000`. Do not create a public database or Qdrant port.
+2. Provision managed PostgreSQL and Qdrant Cloud in reachable regions, then apply `mcp-server/tickets.sql` to PostgreSQL. Keep the PostgreSQL connection string and Qdrant API key in service secrets. Confirm `POSTGRES_URL` includes `sslmode=require` or stronger.
+3. Provision chat and embedding model endpoints that implement the OpenAI-compatible APIs used by `tools/providers.py`. Set the variables listed above in Render's environment/secret settings, including `APP_ENV=production`; never upload `.env`.
+4. Deploy the web service, then verify the platform health check on `/health`. This is a liveness endpoint; protected workflow calls are needed to verify provider and data-service connectivity.
+5. From a trusted ingestion environment, use the same `EMBEDDING_PROVIDER`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBED_MODEL`, and Qdrant settings as the service, then run `python rag-ingest/ingest.py`. If an existing collection has a different dimension, stop and migrate to a separate collection; do not delete or recreate the original.
+6. Verify routing through the protected API using a safe test ticket.
+7. Set n8n's `TRIAGE_API_BASE_URL` to the HTTPS API URL and configure its Header Auth credential with the same API key. Keep the existing n8n workflow logic and change only its API URL/credential as necessary.
 8. If using Vercel, implement a server-side route that forwards requests and attaches `X-API-Key` from a Vercel server-only environment variable. Do not prefix this key with `NEXT_PUBLIC_` or otherwise return it to the browser.
 
 This repository does not contain a frontend or a provider account, and no public deployment has been performed. A hosted LLM is optional in the code but required for a cloud deployment that cannot reach the developer's local Ollama. The `openai_compatible` adapter also supports compatible self-hosted endpoints; it does not require a specific paid provider.
@@ -207,10 +243,11 @@ This repository does not contain a frontend or a provider account, and no public
 ## Security and known limitations
 
 - `.env` and nested `.env` files are ignored by Git and Docker; `.env.example` contains placeholders only. Keep real values in secret stores and rotate any credential that has been exposed.
+- A PostgreSQL password was exposed outside the repository and must be treated as compromised. No credential has been rotated here. After confirming a current backup and maintenance window, change the PostgreSQL role password using the database provider's credential-rotation flow, update `POSTGRES_URL` in the host secret manager and any local Compose environment that uses that role, then restart/redeploy the API and verify routing. For local Compose, an operator can connect with `docker exec -it support-triage-postgres-local psql -U triage -d tickets` and use PostgreSQL's interactive `\password triage` command; then update both local password settings and recreate only the API service. Updating `POSTGRES_PASSWORD` alone does not change a role in an already-initialized volume. Do not alter or recreate volumes as part of rotation.
 - n8n API keys must be stored as n8n credentials, not workflow literals.
 - The REST rate limiter is in-memory and per process. Use one API worker for demo use; for horizontal scaling, move rate limiting to a shared service at the gateway or application layer.
-- The MCP endpoint and REST endpoints share the same API key. Use network/path access controls if MCP should not be public.
-- Health is a liveness check, not a dependency-readiness check. Database, Qdrant, and model-provider failures are returned by the endpoint that needs them.
+- The MCP endpoint and REST endpoints share the same API key and per-process rate limiter. Use network/path access controls if MCP should not be public.
+- `/health` is a liveness check, not a dependency-readiness check. Database, Qdrant, and model-provider failures are returned by the endpoint that needs them.
 - Ingestion supports `.txt` and `.md` files. It removes stale points only in the selected collection.
 - Hosted provider endpoints must implement the OpenAI-compatible chat-completions and/or embeddings API shapes used by the adapters.
 - Vercel is not the runtime for this full Python/MCP/Ollama stack; use a container host for the backend and services.

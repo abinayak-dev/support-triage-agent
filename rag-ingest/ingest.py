@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 load_dotenv(HERE.parent / "mcp-server" / ".env")  # reuse the server's settings if present
 sys.path.insert(0, str(HERE.parent / "mcp-server"))
 
-from tools.providers import embed_texts
+from tools.providers import embed_texts, vector_dimension
 
 KB_DIR = Path(os.getenv("KB_DIR", HERE / "knowledge_base")).resolve()
 QDRANT_HOST = os.getenv("QDRANT_HOST", "http://localhost:6333")
@@ -98,7 +98,10 @@ def main():
     vectors = []
     for i in range(0, len(records), 16):
         vectors.extend(embed([r[2] for r in records[i : i + 16]]))
-    dim = len(vectors[0])
+    try:
+        dim = vector_dimension(vectors)
+    except ValueError:
+        fail("Embedding batches returned inconsistent vector dimensions; Qdrant was left unchanged.")
     print(f"Embedding provider returned {dim}-dimensional vectors")
 
     try:
@@ -112,7 +115,7 @@ def main():
             if have != dim:
                 fail(
                     f"Collection '{COLLECTION}' has vector size {have} but the model produces {dim}. "
-                    f"Delete that collection manually (or use a different QDRANT_COLLECTION) and re-run."
+                    "Choose a new QDRANT_COLLECTION for a separate migration; existing data was left unchanged."
                 )
         else:
             client.create_collection(COLLECTION, vectors_config=VectorParams(size=dim, distance=Distance.COSINE))

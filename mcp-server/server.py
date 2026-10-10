@@ -5,11 +5,8 @@ REST endpoints and MCP tools both call the SAME functions in tools/.
 import logging
 import os
 import secrets
-import time
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from threading import Lock
 from typing import Literal
 
 import anyio
@@ -25,8 +22,10 @@ from pydantic import BaseModel, Field
 load_dotenv(Path(__file__).resolve().parent / ".env")  # must run before tools read env vars
 
 from tools.classify import classify_ticket as _classify  # noqa: E402
+from tools.config import validate_configuration  # noqa: E402
 from tools.errors import TriageError  # noqa: E402
 from tools.rag_query import query_knowledge_base as _query_kb  # noqa: E402
+from tools.security import RateLimiter  # noqa: E402
 from tools.ticket_router import route_ticket as _route  # noqa: E402
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -34,13 +33,15 @@ logging.getLogger("httpx").setLevel(logging.WARNING)  # httpx logs full URLs at 
 logger = logging.getLogger("triage.server")
 
 # ---------------------------------------------------------------- config
-API_KEY = os.getenv("API_KEY", "")
-if not API_KEY or API_KEY == "change-this":
+try:
+    validate_configuration(os.environ)
+except ValueError as exc:
     raise SystemExit(
-        "API_KEY is not set (or still 'change-this'). Generate one with:\n"
-        '  python -c "import secrets; print(secrets.token_urlsafe(32))"\n'
-        "and put it in mcp-server/.env as API_KEY=..."
-    )
+        f"Invalid configuration: {exc}. Generate an API key with "
+        '`python -c "import secrets; print(secrets.token_urlsafe(32))"`.'
+    ) from None
+
+API_KEY = os.environ["API_KEY"]
 RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_MIN", "60"))
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 
@@ -67,26 +68,6 @@ class RouteRequest(BaseModel):
 
 
 # ---------------------------------------------------------------- security helpers
-class RateLimiter:
-    """Simple in-memory sliding window per client. Fine for one process (not multi-worker)."""
-
-    def __init__(self, limit: int, window: int = 60):
-        self.limit, self.window = limit, window
-        self.hits = defaultdict(deque)
-        self.lock = Lock()
-
-    def check(self, key: str):
-        now = time.monotonic()
-        with self.lock:
-            q = self.hits[key]
-            while q and now - q[0] > self.window:
-                q.popleft()
-            if len(q) >= self.limit:
-                return False, 0, int(self.window - (now - q[0])) + 1
-            q.append(now)
-            return True, self.limit - len(q), 0
-
-
 limiter = RateLimiter(RATE_LIMIT)
 
 
@@ -121,6 +102,21 @@ class MCPApiKeyMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and scope["path"].startswith("/mcp"):
             if scope["method"] != "OPTIONS":
+                client = scope.get("client")
+                client_ip = client[0] if client else "unknown"
+                ok, remaining, retry_after = limiter.check(client_ip)
+                if not ok:
+                    resp = JSONResponse(
+                        {"detail": "Rate limit exceeded"},
+                        status_code=429,
+                        headers={
+                            "Retry-After": str(retry_after),
+                            "X-RateLimit-Limit": str(RATE_LIMIT),
+                            "X-RateLimit-Remaining": "0",
+                        },
+                    )
+                    await resp(scope, receive, send)
+                    return
                 headers = dict(scope["headers"])
                 supplied = headers.get(b"x-api-key", b"")
                 if not secrets.compare_digest(supplied, API_KEY.encode()):
