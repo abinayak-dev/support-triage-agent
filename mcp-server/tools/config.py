@@ -22,7 +22,8 @@ def _validate_url(
     try:
         parsed = urlsplit(value)
         if (
-            parsed.scheme not in schemes
+            any(marker in value.lower() for marker in ("replace-with-", "<", ">"))
+            or parsed.scheme not in schemes
             or not parsed.hostname
             or ((parsed.username is not None or parsed.password is not None) and not allow_credentials)
             or (parsed.query and not allow_query)

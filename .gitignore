@@ -4,6 +4,28 @@
 **/.env.*
 !.env.example
 !**/.env.example
+*.env
+**/*.env
+!*.env.example
+!**/*.env.example
+
+# Local credentials and private keys
+credentials
+credentials.*
+**/credentials
+**/credentials.*
+*.pem
+**/*.pem
+*.key
+**/*.key
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
+id_rsa
+id_ed25519
+**/id_rsa
+**/id_ed25519
 
 __pycache__/
 *.py[cod]
